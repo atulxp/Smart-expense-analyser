@@ -235,3 +235,25 @@ Phase 1 separates `P2P` from `Unknown`. `P2P` requires positive evidence such as
 The transaction-level holdout and the grouped unseen-merchant evaluation are both reported in `reports/model_evaluation.json`. The grouped evaluation keeps normalized merchant groups together between train and test and is the more conservative estimate of merchant generalization. Confidence bands are also reported to check whether higher model confidence corresponds to correctness.
 
 The final reports are saved in `reports/non_misc_changes.csv`, `reports/p2p_unknown_diagnostic.csv`, `reports/final_comparison.csv`, and `reports/model_evaluation.json`. The non-Misc review records evidence-based assessments where prior review data is available. Conservative baseline protection prevents unsupported ML disagreements from overwriting explicit keyword categories.
+
+## Phase 2 Entity And Business Features
+
+Phase 2 retains word and character TF-IDF plus Logistic Regression. It appends a small explainable token set to the same feature matrix: entity type, business suffixes, store/food/transport/health/telecom/service indicators, payment markers, transfer language, and VPA-like syntax only when actually present. PERSON remains a soft feature and does not directly produce P2P or Unknown.
+
+On the current reviewed data, transaction-level metrics changed from 81.8% accuracy, 0.623 macro F1, and 0.776 weighted F1 to 87.9%, 0.788, and 0.869. The historical Phase 1 unseen-merchant result was 60.6% accuracy, 0.468 macro F1, and 0.543 weighted F1; the Phase 2 run reports 79.3%, 0.673, and 0.787 using the current normalized merchant grouping. Because normalization changes grouping, this unseen-merchant comparison is documented as a historical reference versus current evaluation, not a claim of an identical split.
+
+The Phase 2 runner writes `reports/phase2_evaluation.json`, `reports/phase2_category_changes.csv`, and `reports/phase2_known_cases.csv`. It does not add web enrichment, feedback, merchant memory, online learning, or retraining workflows.
+
+## Phase 3 Merchant Memory And Human Feedback
+
+Phase 3 adds a local JSON-backed memory layer at `data/merchant_memory.json`. It is intentionally ignored by Git because it contains user decisions. A mapping is created only when a user explicitly confirms an entity in the `Merchant / Entity Review` panel; frequency, entity type, and model confidence never create memory automatically.
+
+The review queue is built from recurring `Unknown` entities and stored as `reports/merchant_review_queue.csv`. Users can select Food, Shopping, Travel, Entertainment, Health, Utilities, P2P, or Keep Unknown. Confirmed mappings take precedence over NLP and produce `Categorization_Method = MERCHANT_MEMORY`, while the original `Baseline_Category`, `NLP_Category`, and `Category_Confidence` remain unchanged for auditability.
+
+Every create or update is appended to `reports/merchant_memory_audit.csv` with the old category, new category, human source, action, and timestamp. Phase 3 does not use web enrichment, retraining, online learning, fuzzy merging, or automatic confirmation.
+
+## Phase 4 Human Feedback And Batch Retraining
+
+Phase 4 records only explicit review confirmations in the separate local `data/human_feedback.csv` dataset. Model predictions, confidence, frequency, entity type, and memory entries created outside the human confirmation action are never converted into training labels. `Keep Unknown` is stored as valid human feedback.
+
+The batch script is `scripts/retrain_from_feedback.py`. It requires 20 unique human-confirmed entities by default, combines validated feedback with the original training data, trains the unchanged word-plus-character TF-IDF and Logistic Regression architecture, and writes an inactive versioned candidate to `models/model_phase4_candidate.joblib`. It does not overwrite or promote the active Phase 2 model. The candidate comparison reports are written only when enough feedback exists.

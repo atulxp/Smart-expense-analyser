@@ -11,6 +11,8 @@ sample_*.txt
 sample_*.csv
 expenses_cleaned.csv
 data/real_transaction_samples.csv
+data/merchant_memory.json
+data/human_feedback.csv
 reports/
 
 # Local generated model/output artifacts

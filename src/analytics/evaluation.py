@@ -10,6 +10,7 @@ from sklearn.pipeline import FeatureUnion
 
 from src.nlp.preprocessing import clean_text
 from src.nlp.entity_extraction import extract_entities
+from src.nlp.classifier import model_text
 
 
 def canonical_label(label: str) -> str:
@@ -62,7 +63,7 @@ def comparison_metrics(df: pd.DataFrame) -> dict:
     }
 
 
-def evaluate_seed_dataset(path) -> dict:
+def evaluate_seed_dataset(path, use_entity_features: bool = True) -> dict:
     """Evaluate the seed data with a stratified holdout, when its size permits."""
     data = pd.read_csv(path)
     label_column = "Final_Label" if "Final_Label" in data.columns else "Category"
@@ -72,12 +73,13 @@ def evaluate_seed_dataset(path) -> dict:
     data[label_column] = data[label_column].map(canonical_label)
     train, test = train_test_split(data, test_size=0.20, random_state=42, stratify=data[label_column])
     vectorizer = _build_vectorizer()
-    features = vectorizer.fit_transform(train["Description"].map(clean_text))
+    features = vectorizer.fit_transform(train["Description"].map(lambda value: model_text(value, use_entity_features)))
     model = LogisticRegression(C=10.0, max_iter=1000, random_state=42).fit(features, train[label_column])
-    predicted = model.predict(vectorizer.transform(test["Description"].map(clean_text)))
+    predicted = model.predict(vectorizer.transform(test["Description"].map(lambda value: model_text(value, use_entity_features))))
     metrics = _metric_report(test[label_column].tolist(), predicted.tolist())
     return {
         "warning": "Holdout is based on manually reviewed real transaction samples; it is not a production accuracy estimate.",
+        "entity_features": use_entity_features,
         "sample_size": len(test),
         "accuracy": metrics["accuracy"],
         "precision": metrics["precision"],
@@ -94,10 +96,12 @@ def evaluate_seed_dataset(path) -> dict:
     }
 
 
-def evaluate_unseen_merchants(path) -> dict:
+def evaluate_unseen_merchants(path, use_entity_features: bool = True) -> dict:
     """Evaluate with normalized merchant groups kept wholly in train or test."""
-    data = pd.read_csv(path).dropna(subset=["Description", "Final_Label"])
-    data["Label"] = data["Final_Label"].map(canonical_label)
+    data = pd.read_csv(path)
+    label_column = "Final_Label" if "Final_Label" in data.columns else "Category"
+    data = data.dropna(subset=["Description", label_column])
+    data["Label"] = data[label_column].map(canonical_label)
     data["Merchant_Group"] = data["Description"].map(
         lambda value: extract_entities(value)["merchant"] if extract_entities(value)["merchant"] != "Unknown" else clean_text(value)
     )
@@ -105,27 +109,28 @@ def evaluate_unseen_merchants(path) -> dict:
     train_index, test_index = next(splitter.split(data, data["Label"], groups=data["Merchant_Group"]))
     train, test = data.iloc[train_index], data.iloc[test_index]
     vectorizer = _build_vectorizer()
-    features = vectorizer.fit_transform(train["Description"].map(clean_text))
+    features = vectorizer.fit_transform(train["Description"].map(lambda value: model_text(value, use_entity_features)))
     model = LogisticRegression(C=10.0, max_iter=1000, random_state=42).fit(features, train["Label"])
-    predicted = model.predict(vectorizer.transform(test["Description"].map(clean_text)))
+    predicted = model.predict(vectorizer.transform(test["Description"].map(lambda value: model_text(value, use_entity_features))))
     metrics = _metric_report(test["Label"].tolist(), predicted.tolist())
     return {
         "evaluation": "MERCHANT-LEVEL / UNSEEN-MERCHANT EVALUATION",
+        "entity_features": use_entity_features,
         "train_size": len(train), "test_size": len(test),
         "unseen_groups": int(test["Merchant_Group"].nunique()), **metrics,
     }
 
 
-def confidence_calibration(path) -> dict:
+def confidence_calibration(path, use_entity_features: bool = True) -> dict:
     """Report validation accuracy by confidence band without changing thresholds."""
     data = pd.read_csv(path).dropna(subset=["Description", "Final_Label"])
     data["Label"] = data["Final_Label"].map(canonical_label)
     train, validation = train_test_split(data, test_size=0.20, random_state=42, stratify=data["Label"])
     vectorizer = _build_vectorizer()
     model = LogisticRegression(C=10.0, max_iter=1000, random_state=42).fit(
-        vectorizer.fit_transform(train["Description"].map(clean_text)), train["Label"]
+        vectorizer.fit_transform(train["Description"].map(lambda value: model_text(value, use_entity_features))), train["Label"]
     )
-    probabilities = model.predict_proba(vectorizer.transform(validation["Description"].map(clean_text)))
+    probabilities = model.predict_proba(vectorizer.transform(validation["Description"].map(lambda value: model_text(value, use_entity_features))))
     predicted = model.classes_[probabilities.argmax(axis=1)]
     confidence = probabilities.max(axis=1)
     bands = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8), (0.8, 1.01)]

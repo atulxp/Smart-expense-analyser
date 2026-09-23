@@ -11,6 +11,7 @@ from .classifier import ExpenseClassifier
 from .entity_extraction import extract_entities
 from .preprocessing import preprocess_description
 from src.web.merchant_enrichment import enrich_merchant
+from src.memory.merchant_memory import get_memory_category, normalize_entity_key
 
 LOGGER = logging.getLogger(__name__)
 UNKNOWN_CATEGORY = "Unknown"
@@ -42,6 +43,7 @@ def get_classifier():
 def categorize_transaction_enhanced(description: str) -> Dict[str, object]:
     baseline = _canonical_category(config.get_category(description))
     entities = extract_entities(description)
+    entity_key = normalize_entity_key(description, entities["merchant"])
     result = {
         "Merchant": entities["merchant"],
         "Search_Candidate": entities["search_candidate"],
@@ -62,7 +64,15 @@ def categorize_transaction_enhanced(description: str) -> Dict[str, object]:
         "Web_Confidence": 0.0,
         "Web_Enriched": False,
         "Preprocessed_Text": preprocess_description(description)["cleaned_text"],
+        "Normalized_Entity": entity_key,
+        "Memory_Category": None,
     }
+    memory_category = get_memory_category(entity_key)
+    if memory_category is not None:
+        result["Memory_Category"] = memory_category
+        result["Final_Category"] = memory_category
+        result["Categorization_Method"] = "MERCHANT_MEMORY"
+        return result
     if result["P2P_Evidence_Positive"]:
         result["NLP_Category"] = P2P_CATEGORY
         result["Final_Category"] = P2P_CATEGORY

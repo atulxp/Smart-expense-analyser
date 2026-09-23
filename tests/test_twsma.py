@@ -4,6 +4,7 @@ import config
 from src.analytics.evaluation import comparison_metrics
 from src.nlp.categorizer import categorize_dataframe, categorize_transaction_enhanced
 from src.nlp.entity_extraction import extract_entities
+from src.nlp.entity_extraction import entity_feature_tokens
 from src.nlp.preprocessing import preprocess_description
 from src.web.merchant_enrichment import enrich_merchant
 
@@ -20,6 +21,8 @@ def test_merchant_extraction_known_and_unknown():
     assert extract_entities("MUMBAIMETRO")["entity_type"] == "SERVICE"
     assert extract_entities("DHARMENDRASINGH")["entity_type"] == "PERSON"
     assert extract_entities("XYZ MART INVOICE 8821")["entity_type"] == "MERCHANT"
+    assert extract_entities("TIWARIENTERPRISE")["entity_type"] == "MERCHANT"
+    assert extract_entities("BundlTechnologiespvtLtd")["entity_type"] == "MERCHANT"
 
 
 def test_classifier_categorizes_representative_descriptions():
@@ -27,6 +30,8 @@ def test_classifier_categorizes_representative_descriptions():
     assert categorize_transaction_enhanced("AMAZON INDIA PURCHASE")["Final_Category"] == "Shopping"
     assert categorize_transaction_enhanced("AMZN INDIA ORDER")["Final_Category"] == "Shopping"
     assert categorize_transaction_enhanced("INDIANRAILWAYTICKETING")["Final_Category"] == "Travel"
+    assert "ENTITY_MERCHANT" in entity_feature_tokens("TIWARIENTERPRISE")
+    assert "HAS_BUSINESS_SUFFIX" in entity_feature_tokens("BundlTechnologiespvtLtd")
 
 
 def test_baseline_protection_keeps_ambiguous_store_match():

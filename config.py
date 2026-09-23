@@ -16,6 +16,13 @@ VECTORIZER_PATH = BASE_DIR / 'models' / 'tfidf_vectorizer.joblib'
 REAL_TRAINING_DATA_PATH = BASE_DIR / 'data' / 'real_transaction_samples.csv'
 TRAINING_DATA_PATH = REAL_TRAINING_DATA_PATH if REAL_TRAINING_DATA_PATH.exists() else BASE_DIR / 'data' / 'training_transactions.csv'
 REAL_LABEL_MINIMUM = 150
+MERCHANT_MEMORY_PATH = BASE_DIR / 'data' / 'merchant_memory.json'
+MERCHANT_MEMORY_AUDIT_PATH = BASE_DIR / 'reports' / 'merchant_memory_audit.csv'
+MERCHANT_REVIEW_QUEUE_PATH = BASE_DIR / 'reports' / 'merchant_review_queue.csv'
+HUMAN_FEEDBACK_PATH = BASE_DIR / 'data' / 'human_feedback.csv'
+FEEDBACK_RETRAIN_MINIMUM = 20
+PHASE2_MODEL_PATH = BASE_DIR / 'models' / 'model_phase2.joblib'
+PHASE4_CANDIDATE_MODEL_PATH = BASE_DIR / 'models' / 'model_phase4_candidate.joblib'
 
 # =================== CATEGORY DEFINITIONS ===================
 CATEGORIES = {

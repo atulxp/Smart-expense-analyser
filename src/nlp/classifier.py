@@ -10,6 +10,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import FeatureUnion
 
 from .preprocessing import clean_text
+from .entity_extraction import entity_feature_tokens
 
 LOGGER = logging.getLogger(__name__)
 
@@ -18,12 +19,20 @@ def _canonical_label(label: str) -> str:
     return "Unknown" if label in {"P2P / Misc", "Others", ""} else label
 
 
+def model_text(description: str, use_entity_features: bool = True) -> str:
+    text = clean_text(description)
+    if not use_entity_features:
+        return text
+    return " ".join([text, *entity_feature_tokens(description)])
+
+
 class ExpenseClassifier:
-    def __init__(self, training_data_path: Path):
+    def __init__(self, training_data_path: Path, use_entity_features: bool = True):
         self.training_data_path = Path(training_data_path)
         self.vectorizer: Optional[TfidfVectorizer] = None
         self.model: Optional[LogisticRegression] = None
         self.training_size = 0
+        self.use_entity_features = use_entity_features
         self._fit()
 
     def _fit(self) -> None:
@@ -31,7 +40,7 @@ class ExpenseClassifier:
         label_column = "Final_Label" if "Final_Label" in data.columns else "Category"
         data = data.dropna(subset=["Description", label_column])
         data = data[data[label_column].astype(str).str.strip() != ""]
-        texts = [clean_text(value) for value in data["Description"]]
+        texts = [self._model_text(value) for value in data["Description"]]
         if len(data) < 2 or len(set(data[label_column])) < 2 or not any(texts):
             raise ValueError("Training data must contain at least two usable categories")
         self.vectorizer = FeatureUnion([
@@ -47,9 +56,12 @@ class ExpenseClassifier:
     def predict(self, description: str) -> Dict[str, object]:
         if not self.model or not self.vectorizer or not clean_text(description):
             return {"category": "Unknown", "confidence": 0.0}
-        probabilities = self.model.predict_proba(self.vectorizer.transform([clean_text(description)]))[0]
+        probabilities = self.model.predict_proba(self.vectorizer.transform([self._model_text(description)]))[0]
         index = int(probabilities.argmax())
         return {"category": _canonical_label(str(self.model.classes_[index])), "confidence": float(probabilities[index])}
+
+    def _model_text(self, description: str) -> str:
+        return model_text(description, self.use_entity_features)
 
     def evaluate(self, descriptions: Iterable[str], labels: Iterable[str]) -> Dict[str, object]:
         from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score

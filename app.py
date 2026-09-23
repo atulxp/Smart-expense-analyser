@@ -1,423 +1,263 @@
-"""
-Smart Expense Analyzer - Streamlit Web App
-Extracts and analyzes transactions from PDF files
-"""
+"""Smart Expense Analyzer Streamlit application."""
 
-import streamlit as st
-import pdfplumber
-import pandas as pd
+import hashlib
 import re
-from datetime import datetime
 from pathlib import Path
-from sklearn.linear_model import LinearRegression
-from sklearn.ensemble import IsolationForest
+
 import numpy as np
+import pandas as pd
+import pdfplumber
+import streamlit as st
+from sklearn.ensemble import IsolationForest
+from sklearn.linear_model import LinearRegression
+
 import config
 from src.analytics.evaluation import comparison_metrics, evaluate_seed_dataset
+from src.memory.human_feedback import append_human_feedback, unique_feedback_entity_count
+from src.memory.merchant_memory import ALLOWED_CATEGORIES, normalize_entity_key, save_memory_mapping
+from src.memory.review_queue import build_review_queue
 from src.nlp.categorizer import categorize_dataframe
 
-
-st.set_page_config(
-    page_title="Smart Expense Analyzer",
-    page_icon="💰",
-    layout="wide"
-)
+st.set_page_config(page_title="Smart Expense Analyzer", page_icon="💰", layout="wide")
 
 
 def extract_text_from_pdf(pdf_file):
-    """Extract text from all pages of a PDF file."""
     try:
         text = ""
         with pdfplumber.open(pdf_file) as pdf:
             for page_num, page in enumerate(pdf.pages):
                 page_text = page.extract_text()
                 if page_text:
-                    text += f"\n--- Page {page_num + 1} ---\n"
-                    text += page_text
-        
+                    text += f"\n--- Page {page_num + 1} ---\n{page_text}"
         return text if text.strip() else None
-    except Exception as e:
-        st.error(f"Error extracting PDF: {str(e)}")
+    except Exception as exc:
+        st.error(f"Error extracting PDF: {exc}")
         return None
 
 
 def parse_transactions(text):
-    """Parse transactions - handles no-space format from GPay PDFs."""
     transactions = []
-    lines = text.split('\n')
-    
-    # Date patterns - handle both spaced ("02 Oct, 2025") and no-space ("02Oct,2025") formats
-    date_pattern = r'(\d{1,2}\s*[A-Za-z]{3}\s*,?\s*\d{4}|\d{1,2}[-./]\d{1,2}[-./]\d{2,4}|\d{4}[-./]\d{1,2}[-./]\d{1,2})'
-    
-    # Amount pattern - handle ₹77, $77, Rs. 77, etc.
-    amount_pattern = r'[₹Rs\$]\.?\s*([\d,]+(?:\.?\d{1,2})?)'
-    
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        
-        if not line or len(line) < 2:
-            i += 1
-            continue
-        
-        # Check if this line contains a date
+    lines = text.split("\n")
+    date_pattern = r"(\d{1,2}\s*[A-Za-z]{3}\s*,?\s*\d{4}|\d{1,2}[-./]\d{1,2}[-./]\d{2,4}|\d{4}[-./]\d{1,2}[-./]\d{1,2})"
+    amount_pattern = r"[₹Rs$]\.??\s*([\d,]+(?:\.?\d{1,2})?)"
+    for index, line in enumerate(lines):
         date_match = re.search(date_pattern, line)
-        
-        if date_match:
-            date_str = date_match.group(1).strip()
-            description = None
-            amount_str = None
-            txn_type = 'Expense'
-            
-            # Collect next 25 lines for the transaction block
-            transaction_block = [line]
-            for j in range(i + 1, min(i + 26, len(lines))):
-                block_line = lines[j].strip()
-                if not block_line:
-                    continue
-                if re.search(date_pattern, block_line):
-                    break
-                transaction_block.append(block_line)
-            
-            block_text = ' '.join(transaction_block)
-            block_text_lower = block_text.lower()
-            
-            # Skip non-transaction blocks
-            if any(skip in block_text_lower for skip in ['statement', 'page ', 'total ', 'balance', 'account', 'note:']):
-                i += 1
+        if not date_match:
+            continue
+        block = [line.strip()]
+        for next_index in range(index + 1, min(index + 26, len(lines))):
+            candidate = lines[next_index].strip()
+            if not candidate:
                 continue
-            
-            # Extract amount - look for ₹ or Rs followed by numbers
-            amt_match = re.search(amount_pattern, block_text)
-            if amt_match:
-                amount_str = amt_match.group(1).strip()
-            
-            # Extract description - look for "Paid to" or "Received from" patterns
-            # Handle both spaced and no-space versions
-            if 'paidto' in block_text_lower or ('paid' in block_text_lower and 'to' in block_text_lower):
-                # Extract text after "Paid to" or "PaidTo"
-                match = re.search(r'paid\s*to\s*([A-Za-z][^₹\d]*?)(?:\s+₹|\s+Rs|\s+\$|UPI|Status|$)', block_text, re.IGNORECASE)
-                if match:
-                    desc = match.group(1).strip()
-                    if desc and len(desc) > 2:
-                        description = desc
-                        txn_type = 'Expense'
-            
-            elif 'receivedfrom' in block_text_lower or ('received' in block_text_lower and 'from' in block_text_lower):
-                # Extract text after "Received from" or "ReceivedFrom"
-                match = re.search(r'received\s*from\s*([A-Za-z][^₹\d]*?)(?:\s+₹|\s+Rs|\s+\$|UPI|Status|$)', block_text, re.IGNORECASE)
-                if match:
-                    desc = match.group(1).strip()
-                    if desc and len(desc) > 2:
-                        description = desc
-                        txn_type = 'Income'
-            
-            # Fallback: find the transaction details line
-            if not description:
-                for block_line in transaction_block:
-                    block_line_lower = block_line.lower()
-                    # Skip lines with specific keywords
-                    if any(x in block_line_lower for x in ['upi', 'transactionid', 'paidby', 'paidto', 'receivedfrom', 'status', 'note']):
-                        continue
-                    # Skip date lines and amount-only lines
-                    if re.search(date_pattern, block_line) or re.match(r'^[₹Rs\$\d,\.]+$', block_line):
-                        continue
-                    if len(block_line) > 3:
-                        description = block_line
-                        break
-            
-            # Add transaction if we have sufficient data
-            if date_str and amount_str and description:
-                description = description.strip()
-                # Clean up description
-                description = re.sub(r'\s+(?:status|completed|pending|upi|transactionid).*', '', description, flags=re.IGNORECASE)
-                description = re.sub(r'\s{2,}', ' ', description)  # Replace multiple spaces with single space
-                
-                if len(description) > 2:
-                    transactions.append({
-                        'Date': date_str,
-                        'Description': description,
-                        'Amount': amount_str,
-                        'Type': txn_type
-                    })
-        
-        i += 1
-    
+            if re.search(date_pattern, candidate):
+                break
+            block.append(candidate)
+        block_text = " ".join(block)
+        lowered = block_text.lower()
+        if any(skip in lowered for skip in ["statement", "page ", "total ", "balance", "account", "note:"]):
+            continue
+        amount_match = re.search(amount_pattern, block_text)
+        description = None
+        transaction_type = "Expense"
+        paid_match = re.search(r"paid\s*to\s*([A-Za-z][^₹\d]*?)(?:\s+₹|\s+Rs|\s+\$|UPI|Status|$)", block_text, re.IGNORECASE)
+        received_match = re.search(r"received\s*from\s*([A-Za-z][^₹\d]*?)(?:\s+₹|\s+Rs|\s+\$|UPI|Status|$)", block_text, re.IGNORECASE)
+        if paid_match:
+            description = paid_match.group(1).strip()
+        elif received_match:
+            description = received_match.group(1).strip()
+            transaction_type = "Income"
+        if not description:
+            for candidate in block:
+                if any(token in candidate.lower() for token in ["upi", "transactionid", "paidby", "paidto", "receivedfrom", "status", "note"]):
+                    continue
+                if re.search(date_pattern, candidate) or re.match(r"^[₹Rs$\d,.]+$", candidate):
+                    continue
+                if len(candidate) > 3:
+                    description = candidate
+                    break
+        if amount_match and description and len(description.strip()) > 2:
+            description = re.sub(r"\s+(?:status|completed|pending|upi|transactionid).*", "", description.strip(), flags=re.IGNORECASE)
+            transactions.append({"Date": date_match.group(1).strip(), "Description": description, "Amount": amount_match.group(1).strip(), "Type": transaction_type})
     return transactions
 
 
-def categorize_transaction(description):
-    """Categorize transaction based on keywords and person-name fallback."""
-    description_lower = description.lower()
-    
-    categories = {
-        'Food': ['swiggy', 'zomato', 'restaurant', 'food', 'cafe'],
-        'Travel': ['uber', 'ola', 'rapido', 'travel'],
-        'Shopping': ['amazon', 'flipkart', 'store', 'mart', 'shop'],
-        'Utilities': ['electricity', 'bill', 'recharge', 'mobile', 'dth'],
-        'Entertainment': ['netflix', 'prime', 'movie'],
-        'Health': ['pharmacy', 'hospital', 'medical'],
-    }
-    
-    for category, keywords in categories.items():
-        for keyword in keywords:
-            if keyword in description_lower:
-                return category
-    
-    # Unmatched descriptions are explicit Unknown abstentions.
-    stripped = re.sub(r'[^A-Za-z\s]', '', description).strip()
-    words = stripped.split()
-    if stripped and len(words) >= 2 and len(words) <= 5 and all(word.isalpha() for word in words):
-        return 'Unknown'
-    
-    return 'Unknown'
-
-
 def clean_data(df):
-    """Clean and standardize data."""
-    if 'Type' in df.columns:
-        df = df[df['Type'] == 'Expense'].copy()
-    
-    df = df.dropna(subset=['Description'])
-    df = df[df['Description'].str.strip() != '']
-    
-    df['Amount'] = df['Amount'].str.replace(',', '')
-    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
-    df = df.dropna(subset=['Amount'])
-    
-    def parse_date(date_str):
-        formats = [
-            '%d%b,%Y',     # 02Oct,2025 (no spaces - GPay format)
-            '%d%b %Y',     # 02Oct 2025 (no space before year)
-            '%d %b, %Y',   # 02 Oct, 2025 (with spaces)
-            '%d %B, %Y',   # 02 October, 2025
-            '%d %b %Y',    # 02 Oct 2025
-            '%d-%m-%Y',    # 02-10-2025
-            '%d/%m/%Y',    # 02/10/2025
-            '%Y-%m-%d',    # 2025-10-02
-            '%d-%m-%y',    # 02-10-25
-            '%d/%m/%y',    # 02/10/25
-            '%Y/%m/%d',    # 2025/10/02
-        ]
-        for fmt in formats:
+    if "Type" in df.columns:
+        df = df[df["Type"] == "Expense"].copy()
+    df = df.dropna(subset=["Description"])
+    df = df[df["Description"].str.strip() != ""]
+    df["Amount"] = pd.to_numeric(df["Amount"].astype(str).str.replace(",", "", regex=False), errors="coerce")
+    df = df.dropna(subset=["Amount"])
+    formats = ["%d%b,%Y", "%d%b %Y", "%d %b, %Y", "%d %B, %Y", "%d %b %Y", "%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%y", "%d/%m/%y", "%Y/%m/%d"]
+    def parse_date(value):
+        for date_format in formats:
             try:
-                return pd.to_datetime(date_str, format=fmt)
+                return pd.to_datetime(value, format=date_format)
             except (ValueError, TypeError):
-                continue
+                pass
         return pd.NaT
-    
-    df['Date'] = df['Date'].apply(parse_date)
-    df = df.dropna(subset=['Date'])
-    
-    if 'Type' in df.columns:
-        df = df.drop('Type', axis=1)
-    
-    df = df.sort_values('Date', ascending=False).reset_index(drop=True)
-    
-    return df
+    df["Date"] = df["Date"].apply(parse_date)
+    df = df.dropna(subset=["Date"])
+    if "Type" in df.columns:
+        df = df.drop(columns=["Type"])
+    return df.sort_values("Date", ascending=False).reset_index(drop=True)
+
+
+def _entity_transactions(df_clean, entity):
+    matching = df_clean.apply(lambda row: normalize_entity_key(row["Description"], row.get("Merchant")) == entity, axis=1)
+    return df_clean.loc[matching].sort_values("Date", ascending=False).copy()
+
+
+def _render_review_section(df_clean):
+    st.markdown("---")
+    st.subheader("🧾 Merchant / Entity Review")
+    st.caption("Only an explicit human confirmation creates memory. Changing a selectbox does not save anything.")
+    feedback_count = unique_feedback_entity_count()
+    st.write(f"Human feedback collected: {feedback_count} entities")
+    st.write(f"Required for retraining: {config.FEEDBACK_RETRAIN_MINIMUM} entities")
+    st.write("Status: " + ("READY FOR BATCH RETRAINING" if feedback_count >= config.FEEDBACK_RETRAIN_MINIMUM else "NOT READY"))
+    review_queue = build_review_queue(df_clean)
+    pending_queue = review_queue[review_queue["review_status"] == "PENDING"]
+    st.write(f"Pending review candidates: {len(pending_queue)}")
+    for queue_index, queue_row in pending_queue.iterrows():
+        entity = queue_row["normalized_entity"]
+        safe_key = f"{queue_index}_{hashlib.sha1(entity.encode('utf-8')).hexdigest()[:12]}"
+        entity_rows = _entity_transactions(df_clean, entity)
+        with st.expander(f"{entity} ({int(queue_row['transaction_count'])} transactions)"):
+            st.write(f"Entity type: {queue_row['entity_type']}")
+            st.write(f"Current category: {queue_row['current_category']}")
+            with st.expander(f"Transactions ({len(entity_rows)})", expanded=False):
+                columns = [column for column in ["Date", "Time", "Amount", "Description", "Final_Category", "Categorization_Method"] if column in entity_rows.columns]
+                display = entity_rows[columns].copy()
+                if "Date" in display.columns:
+                    display["Date"] = display["Date"].dt.strftime("%Y-%m-%d")
+                if "Amount" in display.columns:
+                    display["Amount"] = display["Amount"].map(lambda value: f"₹{value:,.2f}")
+                st.dataframe(display, use_container_width=True, hide_index=True)
+            with st.form(key=f"review_form_{safe_key}"):
+                selected_category = st.selectbox("Confirm category", ["Keep Unknown", *sorted(ALLOWED_CATEGORIES - {"Unknown"})], key=f"memory_category_{safe_key}")
+                submitted = st.form_submit_button("Save human confirmation")
+            if submitted:
+                category = "Unknown" if selected_category == "Keep Unknown" else selected_category
+                example = str(queue_row["representative_description"]).split(" | ")[0]
+                save_memory_mapping(entity, category, entity_type=queue_row["entity_type"], example=example)
+                append_human_feedback(example, queue_row["entity_type"], category, normalized_entity=entity)
+                updated = df_clean.copy()
+                matching = updated.apply(lambda row: normalize_entity_key(row["Description"], row.get("Merchant")) == entity, axis=1)
+                updated.loc[matching, "Memory_Category"] = category
+                updated.loc[matching, "Final_Category"] = category
+                updated.loc[matching, "Category"] = category
+                updated.loc[matching, "Categorization_Method"] = "MERCHANT_MEMORY"
+                st.session_state["processed_transactions"] = updated
+                st.rerun()
+
+
+def _render_processed_dashboard(df_clean):
+    st.success(f"✅ Processed {len(df_clean)} transactions")
+    st.subheader("📊 Cleaned Data Preview")
+    display_df = df_clean.copy()
+    display_df["Date"] = display_df["Date"].dt.strftime("%Y-%m-%d")
+    display_df["Amount"] = display_df["Amount"].map(lambda value: f"₹{value:,.2f}")
+    st.dataframe(display_df, use_container_width=True, hide_index=False)
+    st.markdown("---")
+    st.subheader("📈 Summary Statistics")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("💵 Total Spending", f"₹{df_clean['Amount'].sum():,.2f}")
+    col2.metric("📊 Total Transactions", len(df_clean))
+    col3.metric("📉 Average Amount", f"₹{df_clean['Amount'].mean():,.2f}")
+    category_summary = df_clean.groupby("Category")["Amount"].agg(["sum", "count"]).reset_index()
+    category_summary.columns = ["Category", "Total Amount", "Transaction Count"]
+    category_summary["Total Amount"] = category_summary["Total Amount"].map(lambda value: f"₹{value:,.2f}")
+    st.subheader("🏷️ Spending by Category")
+    st.dataframe(category_summary, use_container_width=True, hide_index=False)
+    st.markdown("---")
+    st.subheader("🧠 TWSMA Text Analytics")
+    metrics = comparison_metrics(df_clean)
+    metric_cols = st.columns(7)
+    metric_cols[0].metric("Automatically classified", metrics["ml_transactions"])
+    metric_cols[1].metric("P2P", metrics["final_p2p_count"])
+    metric_cols[2].metric("Unknown", metrics["final_unknown_count"])
+    metric_cols[3].metric("Baseline Unknown", metrics["baseline_unknown_count"])
+    metric_cols[4].metric("Person entities", metrics["person_entities"])
+    metric_cols[5].metric("Merchant/Service", metrics["merchant_entities"])
+    metric_cols[6].metric("Unresolved %", f"{metrics['final_misc_rate']:.1%}")
+    st.bar_chart(pd.DataFrame({"Baseline": df_clean["Baseline_Category"].value_counts(), "Final": df_clean["Final_Category"].value_counts()}).fillna(0))
+    st.bar_chart(df_clean["Categorization_Method"].value_counts().rename_axis("Method").to_frame("Transactions"))
+    with st.expander("🔬 NLP Processing Details"):
+        from src.nlp.categorizer import get_classifier
+        classifier = get_classifier()
+        st.write(f"Reviewed real-data training rows: {getattr(classifier, 'training_size', 'unavailable')}")
+        st.write(f"ML confidence threshold: {config.ML_CONFIDENCE_THRESHOLD:.2f}")
+        st.dataframe(df_clean[["Description", "Preprocessed_Text", "Merchant", "Transaction_Entity_Type", "NLP_Category", "Category_Confidence", "Categorization_Method", "Web_Enriched"]], use_container_width=True, hide_index=True)
+    with st.expander("📏 Model Evaluation"):
+        evaluation = evaluate_seed_dataset(config.TRAINING_DATA_PATH)
+        st.warning(evaluation["warning"])
+        if "accuracy" in evaluation:
+            st.write({key.title(): f"{evaluation[key]:.3f}" for key in ["accuracy", "precision", "recall", "f1"]})
+    with st.expander("📋 Transaction-level Explainability"):
+        columns = ["Date", "Description", "Merchant", "Transaction_Entity_Type", "Baseline_Category", "NLP_Category", "Final_Category", "Category_Confidence", "Categorization_Method", "Web_Enriched"]
+        explain = df_clean[columns].copy()
+        explain["Date"] = explain["Date"].dt.strftime("%Y-%m-%d")
+        st.dataframe(explain, use_container_width=True, hide_index=True)
+    _render_review_section(df_clean)
+    st.markdown("---")
+    st.subheader("🤖 ML Insights")
+    df_ml = df_clean.sort_values("Date").copy()
+    df_ml["Days"] = (df_ml["Date"] - df_ml["Date"].min()).dt.days
+    if len(df_ml) > 5:
+        model = LinearRegression().fit(df_ml[["Days"]], df_ml["Amount"])
+        future_days = np.arange(df_ml["Days"].max() + 1, df_ml["Days"].max() + 8).reshape(-1, 1)
+        st.metric("🔮 Predicted Spending (Next 7 Days)", f"₹{model.predict(future_days).sum():,.2f}")
+    else:
+        st.info("Not enough data for prediction")
+    anomalies = df_clean.sort_values("Date").copy()
+    if len(anomalies) > 15:
+        anomalies["Amount_log"] = np.log1p(anomalies["Amount"])
+        anomalies["RollingMean"] = anomalies["Amount"].rolling(window=5, min_periods=1).mean()
+        anomalies["Deviation"] = anomalies["Amount"] - anomalies["RollingMean"]
+        anomalies["Anomaly"] = IsolationForest(contamination=0.02, random_state=42).fit_predict(anomalies[["Amount_log", "Deviation"]].fillna(0))
+        anomalies = anomalies[(anomalies["Anomaly"] == -1) & (anomalies["Amount"] > anomalies["Amount"].mean())]
+        st.metric("⚠️ Unusual Transactions Detected", len(anomalies))
+        if not anomalies.empty:
+            st.dataframe(anomalies[["Date", "Description", "Amount"]], use_container_width=True, hide_index=True)
+    else:
+        st.info("Not enough data for anomaly detection")
+    csv_data = df_clean.copy()
+    csv_data["Date"] = csv_data["Date"].dt.strftime("%Y-%m-%d")
+    st.download_button("📥 Download as CSV", data=csv_data.to_csv(index=False), file_name="expenses_cleaned.csv", mime="text/csv", use_container_width=True)
 
 
 def main():
-    """Main Streamlit application"""
+    if "pdf_processed" not in st.session_state:
+        st.session_state["pdf_processed"] = False
+    if "processed_transactions" not in st.session_state:
+        st.session_state["processed_transactions"] = None
     st.title("💰 Smart Expense Analyzer")
     st.markdown("---")
-    
     st.subheader("📄 Upload PDF File")
-    uploaded_file = st.file_uploader(
-        "Choose a PDF file",
-        type=['pdf'],
-        help="Upload your expense PDF (bank statement, GPay, Paytm, etc.)"
-    )
-    
-    if st.button("🔍 Process PDF", use_container_width=True):
+    uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"], help="Upload your expense PDF (bank statement, GPay, Paytm, etc.)")
+    process_button = st.button("🔍 Process PDF", use_container_width=True)
+    if process_button:
         if uploaded_file is None:
             st.warning("⚠️ Please upload a PDF file first!")
-            return
-        
-        with st.spinner("Processing PDF..."):
-            st.info("📖 Extracting text from PDF...")
-            raw_text = extract_text_from_pdf(uploaded_file)
-            
-            if not raw_text:
-                st.error("❌ No text could be extracted from the PDF")
-                return
-            
-            with st.expander("🔍 Raw Extracted Text (Debug)"):
-                st.text(raw_text[:2000] + "..." if len(raw_text) > 2000 else raw_text)
-            
-            st.info("🔎 Parsing transaction data...")
-            transactions = parse_transactions(raw_text)
-            
-            if not transactions:
-                st.warning("⚠️ No transactions found in the PDF.")
-                return
-            
-            st.success(f"✅ Found {len(transactions)} transactions!")
-            
-            st.info("🧹 Cleaning data...")
-            df = pd.DataFrame(transactions)
-            df_clean = clean_data(df)
-            
-            if df_clean.empty:
-                st.warning("⚠️ No valid transactions after cleaning.")
-                return
-            
-            st.info("🏷️ Categorizing transactions with the TWSMA pipeline...")
-            df_clean = categorize_dataframe(df_clean)
-            df_clean['Amount'] = pd.to_numeric(df_clean['Amount'], errors='coerce')
-            df_clean = df_clean.dropna(subset=['Amount'])
-            
-            st.markdown("---")
-            st.subheader("📊 Cleaned Data Preview")
-            
-            display_df = df_clean.copy()
-            display_df['Date'] = display_df['Date'].dt.strftime('%Y-%m-%d')
-            display_df['Amount'] = display_df['Amount'].apply(lambda x: f"₹{x:,.2f}")
-            
-            st.dataframe(display_df, use_container_width=True, hide_index=False)
-            
-            st.markdown("---")
-            st.subheader("📈 Summary Statistics")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("💵 Total Spending", f"₹{df_clean['Amount'].sum():,.2f}")
-            
-            with col2:
-                st.metric("📊 Total Transactions", len(df_clean))
-            
-            with col3:
-                st.metric("📉 Average Amount", f"₹{df_clean['Amount'].mean():,.2f}")
-            
-            st.subheader("🏷️ Spending by Category")
-            
-            category_summary = df_clean.groupby('Category')['Amount'].agg(['sum', 'count']).reset_index()
-            category_summary.columns = ['Category', 'Total Amount', 'Transaction Count']
-            category_summary = category_summary.sort_values('Total Amount', ascending=False)
-            
-            display_category = category_summary.copy()
-            display_category['Total Amount'] = display_category['Total Amount'].apply(lambda x: f"₹{x:,.2f}")
-            
-            st.dataframe(display_category, use_container_width=True, hide_index=False)
-
-            st.markdown("---")
-            st.subheader("🧠 TWSMA Text Analytics")
-            st.caption("Transaction text → preprocessing → entity evidence → TF-IDF → classification → final category")
-            twsma_metrics = comparison_metrics(df_clean)
-            metric_cols = st.columns(7)
-            metric_cols[0].metric("Automatically classified", twsma_metrics['ml_transactions'])
-            metric_cols[1].metric("P2P", twsma_metrics['final_p2p_count'])
-            metric_cols[2].metric("Unknown", twsma_metrics['final_unknown_count'])
-            metric_cols[3].metric("Baseline Unknown", twsma_metrics['baseline_unknown_count'])
-            metric_cols[4].metric("Person entities", twsma_metrics['person_entities'])
-            metric_cols[5].metric("Merchant/Service", twsma_metrics['merchant_entities'])
-            metric_cols[6].metric("Unresolved %", f"{twsma_metrics['final_misc_rate']:.1%}")
-
-            comparison = pd.DataFrame({
-                'Baseline': df_clean['Baseline_Category'].value_counts(),
-                'Final': df_clean['Final_Category'].value_counts(),
-            }).fillna(0)
-            st.write("**Baseline versus enhanced category distribution**")
-            st.bar_chart(comparison)
-            method_counts = df_clean['Categorization_Method'].value_counts().rename_axis('Method').to_frame('Transactions')
-            st.write("**Categorization methods**")
-            st.bar_chart(method_counts)
-
-            with st.expander("🔬 NLP Processing Details"):
-                from src.nlp.categorizer import get_classifier
-                classifier = get_classifier()
-                st.write(f"Reviewed real-data training rows: {getattr(classifier, 'training_size', 'unavailable')}")
-                st.write(f"ML confidence threshold: {config.ML_CONFIDENCE_THRESHOLD:.2f}")
-                st.dataframe(df_clean[['Description', 'Preprocessed_Text', 'Merchant', 'Transaction_Entity_Type', 'NLP_Category', 'Category_Confidence', 'Categorization_Method', 'Web_Enriched']], use_container_width=True, hide_index=True)
-
-            with st.expander("📏 Model Evaluation"):
-                evaluation = evaluate_seed_dataset(config.TRAINING_DATA_PATH)
-                st.warning(evaluation['warning'])
-                if 'accuracy' in evaluation:
-                    st.write({key.title(): f"{evaluation[key]:.3f}" for key in ['accuracy', 'precision', 'recall', 'f1']})
-
-            with st.expander("📋 Transaction-level Explainability"):
-                explain_cols = ['Date', 'Description', 'Merchant', 'Transaction_Entity_Type', 'Baseline_Category', 'NLP_Category', 'Final_Category', 'Category_Confidence', 'Categorization_Method', 'Web_Enriched']
-                explain_df = df_clean[explain_cols].copy()
-                explain_df['Date'] = explain_df['Date'].dt.strftime('%Y-%m-%d')
-                st.dataframe(explain_df, use_container_width=True, hide_index=True)
-            
-            st.markdown("---")
-            st.subheader("🤖 ML Insights")
-            st.write("This section uses a simple regression model to forecast spending and an isolation forest to flag unusual amounts.")
-            
-            # =========================
-            # 1. SPENDING PREDICTION
-            # =========================
-            df_ml = df_clean.copy()
-            df_ml = df_ml.sort_values('Date')
-            df_ml['Days'] = (df_ml['Date'] - df_ml['Date'].min()).dt.days
-            X = df_ml[['Days']]
-            y = df_ml['Amount']
-            
-            if len(df_ml) > 5:
-                model = LinearRegression()
-                model.fit(X, y)
-                future_days = np.arange(df_ml['Days'].max() + 1, df_ml['Days'].max() + 8).reshape(-1, 1)
-                predictions = model.predict(future_days)
-                predicted_spending = predictions.sum()
-                st.metric("🔮 Predicted Spending (Next 7 Days)", f"₹{predicted_spending:,.2f}")
-            else:
-                st.info("Not enough data for prediction")
-            
-            # =========================
-            # 2. ANOMALY DETECTION
-            # =========================
-            df_clean['Anomaly'] = 1
-            if len(df_clean) > 15:
-                df_anomaly = df_clean.copy()
-                df_anomaly = df_anomaly.sort_values('Date')
-                df_anomaly['Amount_log'] = np.log1p(df_anomaly['Amount'])
-                df_anomaly['RollingMean'] = df_anomaly['Amount'].rolling(window=5, min_periods=1).mean()
-                df_anomaly['Deviation'] = df_anomaly['Amount'] - df_anomaly['RollingMean']
-                features = df_anomaly[['Amount_log', 'Deviation']].fillna(0)
-
-                iso = IsolationForest(
-                    contamination=0.02,
-                    random_state=42
-                )
-                df_anomaly['anomaly'] = iso.fit_predict(features)
-
-                # merge anomaly labels back into the main cleaned dataframe
-                df_clean['Anomaly'] = df_anomaly['anomaly']
-
-                anomalies = df_anomaly[df_anomaly['anomaly'] == -1]
-                anomalies = anomalies[anomalies['Amount'] > df_anomaly['Amount'].mean()]
-
-                st.metric("⚠️ Unusual Transactions Detected", len(anomalies))
-                if not anomalies.empty:
-                    st.write("### 🚨 Suspicious Transactions")
-                    display_anomaly = anomalies[['Date', 'Description', 'Amount']].copy()
-                    display_anomaly['Date'] = display_anomaly['Date'].dt.strftime('%Y-%m-%d')
-                    display_anomaly['Amount'] = display_anomaly['Amount'].apply(lambda x: f"₹{x:,.2f}")
-                    st.dataframe(display_anomaly, use_container_width=True)
-            else:
-                st.info("Not enough data for anomaly detection")
-            
-            st.markdown("---")
-            st.subheader("💾 Download Cleaned Data")
-            
-            csv_data = df_clean.copy()
-            csv_data['Date'] = csv_data['Date'].dt.strftime('%Y-%m-%d')
-            csv_buffer = csv_data.to_csv(index=False)
-            
-            st.download_button(
-                label="📥 Download as CSV",
-                data=csv_buffer,
-                file_name="expenses_cleaned.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-            
-            output_path = Path("expenses_cleaned.csv")
-            csv_data.to_csv(output_path, index=False)
-            st.success(f"✅ Dataset saved to {output_path}")
+        else:
+            with st.spinner("Processing PDF..."):
+                raw_text = extract_text_from_pdf(uploaded_file)
+                transactions = parse_transactions(raw_text or "") if raw_text else []
+                if not transactions:
+                    st.error("❌ No transactions found in the PDF.")
+                else:
+                    df_clean = categorize_dataframe(clean_data(pd.DataFrame(transactions)))
+                    df_clean["Amount"] = pd.to_numeric(df_clean["Amount"], errors="coerce")
+                    df_clean = df_clean.dropna(subset=["Amount"])
+                    st.session_state["processed_transactions"] = df_clean.copy()
+                    st.session_state["pdf_processed"] = True
+                    st.session_state["uploaded_file_name"] = uploaded_file.name
+                    st.session_state["raw_pdf_text"] = raw_text
+    if st.session_state["pdf_processed"] and st.session_state["processed_transactions"] is not None:
+        _render_processed_dashboard(st.session_state["processed_transactions"])
+    else:
+        st.info("Upload a PDF and click Process PDF to begin.")
 
 
 if __name__ == "__main__":
