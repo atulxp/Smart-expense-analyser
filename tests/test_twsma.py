@@ -1,6 +1,7 @@
 import pandas as pd
 
 import config
+from app import parse_transactions
 from src.analytics.evaluation import comparison_metrics
 from src.nlp.categorizer import categorize_dataframe, categorize_transaction_enhanced
 from src.nlp.entity_extraction import extract_entities
@@ -66,6 +67,19 @@ def test_web_failure_is_non_fatal(monkeypatch):
     monkeypatch.setattr("src.web.merchant_enrichment.urlopen", lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError()))
     result = enrich_merchant("XYZ Unknown Merchant", timeout=1)
     assert result["enriched"] is False
+
+
+def test_ocr_style_gpay_transaction_line_is_parsed():
+    sample = (
+        "02Oct2,025 PaitdoPunjSaibnFdoodCsolaNbaavy ₹77\n"
+        "12:P2M0 UPTIransaIcDt5:i6o4n163485045\n"
+        "PaibdyStaBtaenokfInd9i6a20\n"
+    )
+    result = parse_transactions(sample)
+    assert len(result) == 1
+    assert result[0]["Date"] == "2025-10-02"
+    assert result[0]["Description"] == "PaitdoPunjSaibnFdoodCsolaNbaavy"
+    assert result[0]["Amount"] == "77"
 
 
 def test_dataframe_and_comparison_metrics():

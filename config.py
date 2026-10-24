@@ -78,30 +78,29 @@ SUPPORTED_DATE_FORMATS = [
 
 # =================== STREAMLIT UI SETTINGS ===================
 APP_TITLE = "Smart Expense Analyzer"
-APP_ICON = "💰"
 APP_LAYOUT = "wide"
 
 # Page titles and messages
 TITLES = {
-    'main': "💰 Smart Expense Analyzer",
-    'upload': "📄 Upload PDF File",
-    'data_preview': "📊 Cleaned Data Preview",
-    'summary': "📈 Summary Statistics",
-    'category': "🏷️ Spending by Category",
-    'download': "💾 Download Cleaned Data",
+    'main': "Smart Expense Analyzer",
+    'upload': "Upload PDF File",
+    'data_preview': "Cleaned Data Preview",
+    'summary': "Summary Statistics",
+    'category': "Spending by Category",
+    'download': "Download Cleaned Data",
 }
 
 MESSAGES = {
-    'no_file': "⚠️ Please upload a PDF file first!",
-    'extracting': "📖 Extracting text from PDF...",
-    'extraction_failed': "❌ No text could be extracted from the PDF",
-    'parsing': "🔎 Parsing transaction data...",
-    'parsing_success': "✅ Found {count} transactions!",
-    'parsing_failed': "⚠️ No transactions found in the PDF. Try a different format.",
-    'cleaning': "🧹 Cleaning data...",
-    'cleaning_failed': "⚠️ No valid transactions after cleaning the data.",
-    'categorizing': "🏷️ Categorizing transactions...",
-    'success': "✅ Dataset saved to {path}",
+    'no_file': "Please upload a PDF file first!",
+    'extracting': "Extracting text from PDF...",
+    'extraction_failed': "No text could be extracted from the PDF",
+    'parsing': "Parsing transaction data...",
+    'parsing_success': "Found {count} transactions!",
+    'parsing_failed': "No transactions found in the PDF. Try a different format.",
+    'cleaning': "Cleaning data...",
+    'cleaning_failed': "No valid transactions after cleaning the data.",
+    'categorizing': "Categorizing transactions...",
+    'success': "Dataset saved to {path}",
 }
 
 # =================== DATA CLEANING SETTINGS ===================
